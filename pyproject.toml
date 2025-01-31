@@ -12,7 +12,7 @@ bs4 = "^0.0.2"
 [tool.poetry.dev-dependencies]
 autoflake = "^2.0.0"
 isort = "^5.10.1"
-black = "^24.0.0"
+black = "^25.0.0"
 pytest = "^8.0.0"
 
 [build-system]
