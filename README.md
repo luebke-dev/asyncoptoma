@@ -5,7 +5,7 @@
 ## Installation
 
 ```bash
-pip insall asyncoptoma
+pip install asyncoptoma
 ```
 
 ## Usage
