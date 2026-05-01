@@ -385,18 +385,18 @@ testing = ["coverage (>=6.2)", "hypothesis (>=5.7.1)"]
 
 [[package]]
 name = "respx"
-version = "0.21.1"
+version = "0.23.1"
 description = "A utility for mocking out the Python HTTPX and HTTP Core libraries."
 optional = false
-python-versions = ">=3.7"
+python-versions = ">=3.8"
 groups = ["dev"]
 files = [
-    {file = "respx-0.21.1-py2.py3-none-any.whl", hash = "sha256:05f45de23f0c785862a2c92a3e173916e8ca88e4caad715dd5f68584d6053c20"},
-    {file = "respx-0.21.1.tar.gz", hash = "sha256:0bd7fe21bfaa52106caa1223ce61224cf30786985f17c63c5d71eff0307ee8af"},
+    {file = "respx-0.23.1-py2.py3-none-any.whl", hash = "sha256:b18004b029935384bccfa6d7d9d74b4ec9af73a081cc28600fffc0447f4b8c1a"},
+    {file = "respx-0.23.1.tar.gz", hash = "sha256:242dcc6ce6b5b9bf621f5870c82a63997e8e82bc7c947f9ffe272b8f3dd5a780"},
 ]
 
 [package.dependencies]
-httpx = ">=0.21.0"
+httpx = ">=0.25.0"
 
 [[package]]
 name = "sniffio"
@@ -451,4 +451,4 @@ markers = {dev = "python_version < \"3.11\""}
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.9"
-content-hash = "ef372d6b6ba4d5404b53cbf7f9fb96a2329abebc6635544fb48797a27561dbe2"
+content-hash = "c6edf311d6b91602b7f12d4e80ff958912985b46e9f45a9e9e88b98cc8a03006"
