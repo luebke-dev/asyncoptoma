@@ -165,3 +165,61 @@ async def test_toggle_fetches_status_when_unknown(optoma: Optoma) -> None:
     assert optoma.get_av_mute() is True
 
     await optoma.close()
+
+
+@respx.mock
+async def test_generic_accessors(optoma: Optoma) -> None:
+    respx.get(f"{BASE_URL}/login.htm").mock(
+        return_value=httpx.Response(200, text=LOGIN_HTML)
+    )
+    respx.post(f"{BASE_URL}/tgi/login.tgi").mock(
+        return_value=httpx.Response(200, text="ok")
+    )
+    respx.get(f"{BASE_URL}/control.htm").mock(
+        return_value=httpx.Response(200, text=CONTROL_HTML)
+    )
+    control_route = respx.post(f"{BASE_URL}/tgi/control.tgi").mock(
+        return_value=httpx.Response(200, text="ok")
+    )
+
+    await optoma.login()
+
+    # Generic dropdown accessor returns the same data as the named wrapper.
+    assert optoma.get_active("source") == optoma.get_active_source()
+    assert optoma.get_available("source") == optoma.get_available_sources()
+
+    # set_active via generic API mutates the cache.
+    await optoma.set_active("source", "HDMI 1")
+    assert control_route.called
+    assert optoma.get_active("source") == "HDMI 1"
+    assert optoma.get_active_source() == "HDMI 1"
+
+    # Generic input accessor.
+    assert optoma.get_value("bright") == optoma.get_brightness()
+    await optoma.set_value("bright", 75)
+    assert optoma.get_brightness() == 75
+
+    await optoma.close()
+
+
+@respx.mock
+async def test_named_methods_match_generic(optoma: Optoma) -> None:
+    respx.get(f"{BASE_URL}/control.htm").mock(
+        return_value=httpx.Response(200, text=CONTROL_HTML)
+    )
+    await optoma.update_status()
+
+    # Toggle: named method routes through generic.
+    assert optoma.get_freeze() == optoma.get_toggle("freeze")
+    assert optoma.get_av_mute() == optoma.get_toggle("avmute")
+
+    # Input: named method routes through generic.
+    assert optoma.get_zoom() == optoma.get_value("zoom")
+
+    # Sanity: generated methods exist for every configured field.
+    assert callable(getattr(Optoma, "set_active_brightness_mode"))
+    assert callable(getattr(Optoma, "get_active_color_temperature"))
+    assert callable(getattr(Optoma, "set_high_altitude"))
+    assert callable(getattr(Optoma, "get_brilliant_color"))
+
+    await optoma.close()
