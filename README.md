@@ -41,6 +41,24 @@ the underlying HTTP connection pool.
 Errors raised from the projector or the HTTP layer are wrapped in
 `asyncoptoma.OptomaError` (with `OptomaAuthError` for authentication failures).
 
+### Generic accessors
+
+Every named convenience method (`set_active_source`, `get_brightness`, …) is a
+thin wrapper around a generic accessor. You can address any field by its raw
+projector name directly:
+
+```python
+await projector.set_active("source", "HDMI 1")
+print(projector.get_active("source"))
+print(projector.get_available("lampmd"))
+
+await projector.set_toggle("avmute", True)
+print(projector.get_toggle("freeze"))
+
+await projector.set_value("zoom", -5)
+print(projector.get_value("bright"))
+```
+
 ## Tested models
 
 |Model|

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 from bs4 import BeautifulSoup, Tag
@@ -14,7 +14,8 @@ _LOGGER = logging.getLogger(__name__)
 _CONTROL_PATH = "/tgi/control.tgi"
 _LOGIN_PATH = "/tgi/login.tgi"
 
-_DROPDOWNS: tuple[str, ...] = (
+# Every dropdown the projector exposes, including those without convenience methods.
+_ALL_DROPDOWNS: tuple[str, ...] = (
     "source",
     "Degamma",
     "Degamma2",
@@ -34,41 +35,52 @@ _DROPDOWNS: tuple[str, ...] = (
     "lampmd",
 )
 
-_TOGGLES: tuple[str, ...] = (
-    "avmute",
-    "freeze",
-    "infohide",
-    "altitude",
-    "keypad",
-    "dismdlocked",
-    "directpwon",
-    "alwayson",
+# (raw_field, available_method_suffix, active_method_suffix)
+_DROPDOWN_METHODS: tuple[tuple[str, str, str], ...] = (
+    ("source", "sources", "source"),
+    ("dismode0", "dismodes_0", "dismode_0"),
+    ("dismode1", "dismodes_1", "dismode_1"),
+    ("colorsp0", "colorsps_0", "colorsp_0"),
+    ("colorsp1", "colorsps_1", "colorsp_1"),
+    ("Degamma", "gammas", "gamma"),
+    ("lampmd", "brightness_modes", "brightness_mode"),
+    ("colortmp", "color_temperature", "color_temperature"),
+    ("logo", "logo", "logo"),
+    ("pwmode", "power_modes", "power_mode"),
 )
 
-_INPUTS: tuple[str, ...] = (
-    "bright",
-    "contrast",
-    "Sharp",
-    "Phase",
-    "brill",
-    "zoom",
-    "hpos",
-    "vpos",
-    "autopw",
-    "sleep",
-    "projid",
+# (raw_field, public_name, projector_command_label)
+_TOGGLE_METHODS: tuple[tuple[str, str, str], ...] = (
+    ("avmute", "av_mute", "AV Mute"),
+    ("freeze", "freeze", "Freeze"),
+    ("infohide", "info_hide", "Information Hide"),
+    ("altitude", "high_altitude", "High Altitude"),
+    ("keypad", "keypad_lock", "Keypad Lock"),
+    ("dismdlocked", "display_mode_lock", "Display Mode Lock"),
+    ("directpwon", "direct_power_on", "Direct Power On"),
+    ("alwayson", "always_on", "Always On"),
+)
+
+# (raw_field, public_name)
+_INPUT_METHODS: tuple[tuple[str, str], ...] = (
+    ("bright", "brightness"),
+    ("contrast", "contrast"),
+    ("Sharp", "sharpness"),
+    ("Phase", "phase"),
+    ("brill", "brilliant_color"),
+    ("zoom", "zoom"),
+    ("hpos", "horizontal_shift"),
+    ("vpos", "vertical_shift"),
+    ("autopw", "auto_power_off"),
+    ("sleep", "sleep_timer"),
+    ("projid", "projector_id"),
 )
 
 _TOGGLE_COMMAND_LABELS: dict[str, str] = {
-    "avmute": "AV Mute",
-    "freeze": "Freeze",
-    "infohide": "Information Hide",
-    "altitude": "High Altitude",
-    "keypad": "Keypad Lock",
-    "dismdlocked": "Display Mode Lock",
-    "directpwon": "Direct Power On",
-    "alwayson": "Always On",
+    raw: label for raw, _, label in _TOGGLE_METHODS
 }
+_TOGGLE_RAW_FIELDS: frozenset[str] = frozenset(raw for raw, _, _ in _TOGGLE_METHODS)
+_INPUT_RAW_FIELDS: frozenset[str] = frozenset(raw for raw, _ in _INPUT_METHODS)
 
 
 class OptomaError(Exception):
@@ -94,10 +106,10 @@ class Optoma:
         self._owns_client = client is None
         self.http = client if client is not None else httpx.AsyncClient(timeout=timeout)
         self.status: dict[str, Any] = {
-            **{f"available_{name}": {} for name in _DROPDOWNS},
-            **{f"active_{name}": None for name in _DROPDOWNS},
-            **{name: None for name in _TOGGLES},
-            **{name: None for name in _INPUTS},
+            **{f"available_{name}": {} for name in _ALL_DROPDOWNS},
+            **{f"active_{name}": None for name in _ALL_DROPDOWNS},
+            **{name: None for name in _TOGGLE_RAW_FIELDS},
+            **{name: None for name in _INPUT_RAW_FIELDS},
             "power": None,
         }
 
@@ -177,7 +189,7 @@ class Optoma:
         response = await self._make_request("GET", "/control.htm")
         soup = BeautifulSoup(response.text, "html.parser")
 
-        dropdowns = set(_DROPDOWNS)
+        dropdowns = set(_ALL_DROPDOWNS)
         for select in soup.find_all("select"):
             key = select.get("id")
             if key in dropdowns:
@@ -185,18 +197,16 @@ class Optoma:
                 self.status[f"available_{key}"] = {o["label"]: o["id"] for o in options}
                 self.status[f"active_{key}"] = active
 
-        toggles = set(_TOGGLES)
         for btn in soup.find_all("td"):
             key = btn.get("id", "")
             if key.endswith("_td"):
                 name = key[:-3]
-                if name in toggles:
+                if name in _TOGGLE_RAW_FIELDS:
                     self.status[name] = btn.get_text().strip() in ("On", "Yes")
 
-        inputs = set(_INPUTS)
         for inp in soup.find_all("input"):
             key = inp.get("id")
-            if key in inputs:
+            if key in _INPUT_RAW_FIELDS:
                 try:
                     self.status[key] = int(inp["value"])
                 except (KeyError, ValueError):
@@ -209,7 +219,17 @@ class Optoma:
             except ValueError:
                 self.status["power"] = None
 
-    async def _set_choice(self, field: str, value: str) -> None:
+    # -- Generic accessors --
+    def get_available(self, field: str) -> dict[str, int]:
+        """Return the mapping of label -> id for a dropdown field."""
+        return self.status[f"available_{field}"]
+
+    def get_active(self, field: str) -> str | None:
+        """Return the currently selected label for a dropdown field."""
+        return self.status[f"active_{field}"]
+
+    async def set_active(self, field: str, value: str) -> None:
+        """Select a dropdown value by label, no-op if already active or unavailable."""
         if self.status.get(f"active_{field}") == value:
             return
         available = self.status.get(f"available_{field}") or {}
@@ -219,11 +239,12 @@ class Optoma:
         await self._make_request("POST", _CONTROL_PATH, {field: available[value]})
         self.status[f"active_{field}"] = value
 
-    async def _set_value(self, field: str, value: int) -> None:
-        await self._make_request("POST", _CONTROL_PATH, {field: value})
-        self.status[field] = value
+    def get_toggle(self, field: str) -> bool | None:
+        """Return the cached state of a toggle."""
+        return self.status[field]
 
-    async def _toggle(self, field: str, value: bool) -> None:
+    async def set_toggle(self, field: str, value: bool) -> None:
+        """Set a toggle, refreshing status first if its current state is unknown."""
         if self.status.get(field) is None:
             await self.update_status()
         if self.status.get(field) == value:
@@ -233,229 +254,16 @@ class Optoma:
         )
         self.status[field] = value
 
-    # -- Sources --
-    def get_available_sources(self) -> dict[str, int]:
-        return self.status["available_source"]
-
-    def get_active_source(self) -> str | None:
-        return self.status["active_source"]
-
-    async def set_active_source(self, value: str) -> None:
-        await self._set_choice("source", value)
-
-    # -- Display mode 0 --
-    def get_available_dismodes_0(self) -> dict[str, int]:
-        return self.status["available_dismode0"]
-
-    def get_active_dismode_0(self) -> str | None:
-        return self.status["active_dismode0"]
-
-    async def set_active_dismode_0(self, value: str) -> None:
-        await self._set_choice("dismode0", value)
-
-    # -- Display mode 1 --
-    def get_available_dismodes_1(self) -> dict[str, int]:
-        return self.status["available_dismode1"]
-
-    def get_active_dismode_1(self) -> str | None:
-        return self.status["active_dismode1"]
-
-    async def set_active_dismode_1(self, value: str) -> None:
-        await self._set_choice("dismode1", value)
-
-    # -- Color space 0 --
-    def get_available_colorsps_0(self) -> dict[str, int]:
-        return self.status["available_colorsp0"]
-
-    def get_active_colorsp_0(self) -> str | None:
-        return self.status["active_colorsp0"]
-
-    async def set_active_colorsp_0(self, value: str) -> None:
-        await self._set_choice("colorsp0", value)
-
-    # -- Color space 1 --
-    def get_available_colorsps_1(self) -> dict[str, int]:
-        return self.status["available_colorsp1"]
-
-    def get_active_colorsp_1(self) -> str | None:
-        return self.status["active_colorsp1"]
-
-    async def set_active_colorsp_1(self, value: str) -> None:
-        await self._set_choice("colorsp1", value)
-
-    # -- Gamma --
-    def get_available_gammas(self) -> dict[str, int]:
-        return self.status["available_Degamma"]
-
-    def get_active_gamma(self) -> str | None:
-        return self.status["active_Degamma"]
-
-    async def set_active_gamma(self, value: str) -> None:
-        await self._set_choice("Degamma", value)
-
-    # -- Brightness / lamp mode --
-    def get_available_brightness_modes(self) -> dict[str, int]:
-        return self.status["available_lampmd"]
-
-    def get_active_brightness_mode(self) -> str | None:
-        return self.status["active_lampmd"]
-
-    async def set_active_brightness_mode(self, value: str) -> None:
-        await self._set_choice("lampmd", value)
-
-    # -- Color temperature --
-    def get_available_color_temperature(self) -> dict[str, int]:
-        return self.status["available_colortmp"]
-
-    def get_active_color_temperature(self) -> str | None:
-        return self.status["active_colortmp"]
-
-    async def set_active_color_temperature(self, value: str) -> None:
-        await self._set_choice("colortmp", value)
-
-    # -- Logo --
-    def get_available_logo(self) -> dict[str, int]:
-        return self.status["available_logo"]
-
-    def get_active_logo(self) -> str | None:
-        return self.status["active_logo"]
-
-    async def set_active_logo(self, value: str) -> None:
-        await self._set_choice("logo", value)
-
-    # -- Power mode --
-    def get_available_power_modes(self) -> dict[str, int]:
-        return self.status["available_pwmode"]
-
-    def get_active_power_mode(self) -> str | None:
-        return self.status["active_pwmode"]
-
-    async def set_active_power_mode(self, value: str) -> None:
-        await self._set_choice("pwmode", value)
-
-    # -- Toggles --
-    def get_info_hide(self) -> bool | None:
-        return self.status["infohide"]
-
-    async def set_info_hide(self, value: bool) -> None:
-        await self._toggle("infohide", value)
-
-    def get_always_on(self) -> bool | None:
-        return self.status["alwayson"]
-
-    async def set_always_on(self, value: bool) -> None:
-        await self._toggle("alwayson", value)
-
-    def get_freeze(self) -> bool | None:
-        return self.status["freeze"]
-
-    async def set_freeze(self, value: bool) -> None:
-        await self._toggle("freeze", value)
-
-    def get_av_mute(self) -> bool | None:
-        return self.status["avmute"]
-
-    async def set_av_mute(self, value: bool) -> None:
-        await self._toggle("avmute", value)
-
-    def get_high_altitude(self) -> bool | None:
-        return self.status["altitude"]
-
-    async def set_high_altitude(self, value: bool) -> None:
-        await self._toggle("altitude", value)
-
-    def get_keypad_lock(self) -> bool | None:
-        return self.status["keypad"]
-
-    async def set_keypad_lock(self, value: bool) -> None:
-        await self._toggle("keypad", value)
-
-    def get_display_mode_lock(self) -> bool | None:
-        return self.status["dismdlocked"]
-
-    async def set_display_mode_lock(self, value: bool) -> None:
-        await self._toggle("dismdlocked", value)
-
-    def get_direct_power_on(self) -> bool | None:
-        return self.status["directpwon"]
-
-    async def set_direct_power_on(self, value: bool) -> None:
-        await self._toggle("directpwon", value)
-
-    # -- Numeric values --
-    def get_zoom(self) -> int | None:
-        return self.status["zoom"]
-
-    async def set_zoom(self, value: int) -> None:
-        await self._set_value("zoom", value)
-
-    def get_horizontal_shift(self) -> int | None:
-        return self.status["hpos"]
-
-    async def set_horizontal_shift(self, value: int) -> None:
-        await self._set_value("hpos", value)
-
-    def get_vertical_shift(self) -> int | None:
-        return self.status["vpos"]
-
-    async def set_vertical_shift(self, value: int) -> None:
-        await self._set_value("vpos", value)
-
-    def get_auto_power_off(self) -> int | None:
-        return self.status["autopw"]
-
-    async def set_auto_power_off(self, value: int) -> None:
-        await self._set_value("autopw", value)
-
-    def get_sleep_timer(self) -> int | None:
-        return self.status["sleep"]
-
-    async def set_sleep_timer(self, value: int) -> None:
-        await self._set_value("sleep", value)
-
-    def get_projector_id(self) -> int | None:
-        return self.status["projid"]
-
-    async def set_projector_id(self, value: int) -> None:
-        await self._set_value("projid", value)
-
-    def get_brightness(self) -> int | None:
-        return self.status["bright"]
-
-    async def set_brightness(self, value: int) -> None:
-        await self._set_value("bright", value)
-
-    def get_contrast(self) -> int | None:
-        return self.status["contrast"]
-
-    async def set_contrast(self, value: int) -> None:
-        await self._set_value("contrast", value)
-
-    def get_sharpness(self) -> int | None:
-        return self.status["Sharp"]
-
-    async def set_sharpness(self, value: int) -> None:
-        await self._set_value("Sharp", value)
-
-    def get_phase(self) -> int | None:
-        return self.status["Phase"]
-
-    async def set_phase(self, value: int) -> None:
-        await self._set_value("Phase", value)
-
-    def get_brilliant_color(self) -> int | None:
-        return self.status["brill"]
-
-    async def set_brilliant_color(self, value: int) -> None:
-        await self._set_value("brill", value)
-
-    # -- Commands --
-    async def resync(self) -> None:
-        await self._make_request("POST", _CONTROL_PATH, {"resync": "Resync"})
-
-    async def reset(self) -> None:
-        await self._make_request("POST", _CONTROL_PATH, {"reset": "Reset"})
-
+    def get_value(self, field: str) -> int | None:
+        """Return the cached numeric value for an input field."""
+        return self.status[field]
+
+    async def set_value(self, field: str, value: int) -> None:
+        """Send a numeric input value to the projector."""
+        await self._make_request("POST", _CONTROL_PATH, {field: value})
+        self.status[field] = value
+
+    # -- Power --
     def get_power(self) -> bool | None:
         return self.status["power"]
 
@@ -466,3 +274,84 @@ class Optoma:
     async def turn_off(self) -> None:
         await self._make_request("POST", _CONTROL_PATH, {"btn_powoff": "Power Off"})
         self.status["power"] = False
+
+    # -- Commands --
+    async def resync(self) -> None:
+        await self._make_request("POST", _CONTROL_PATH, {"resync": "Resync"})
+
+    async def reset(self) -> None:
+        await self._make_request("POST", _CONTROL_PATH, {"reset": "Reset"})
+
+
+# Bind the named convenience methods (get_active_source, set_brightness, …) from
+# the config tables above.  Generated methods just delegate to the generic
+# accessors; the generic API is the source of truth.
+
+
+def _make_dropdown_methods(
+    raw: str,
+) -> tuple[
+    Callable[[Optoma], dict[str, int]],
+    Callable[[Optoma], str | None],
+    Callable[[Optoma, str], Awaitable[None]],
+]:
+    def get_available(self: Optoma) -> dict[str, int]:
+        return self.get_available(raw)
+
+    def get_active(self: Optoma) -> str | None:
+        return self.get_active(raw)
+
+    async def set_active(self: Optoma, value: str) -> None:
+        await self.set_active(raw, value)
+
+    return get_available, get_active, set_active
+
+
+def _make_toggle_methods(
+    raw: str,
+) -> tuple[Callable[[Optoma], bool | None], Callable[[Optoma, bool], Awaitable[None]]]:
+    def getter(self: Optoma) -> bool | None:
+        return self.get_toggle(raw)
+
+    async def setter(self: Optoma, value: bool) -> None:
+        await self.set_toggle(raw, value)
+
+    return getter, setter
+
+
+def _make_input_methods(
+    raw: str,
+) -> tuple[Callable[[Optoma], int | None], Callable[[Optoma, int], Awaitable[None]]]:
+    def getter(self: Optoma) -> int | None:
+        return self.get_value(raw)
+
+    async def setter(self: Optoma, value: int) -> None:
+        await self.set_value(raw, value)
+
+    return getter, setter
+
+
+for _raw, _avail_suffix, _active_suffix in _DROPDOWN_METHODS:
+    _g_avail, _g_active, _s_active = _make_dropdown_methods(_raw)
+    _g_avail.__name__ = f"get_available_{_avail_suffix}"
+    _g_active.__name__ = f"get_active_{_active_suffix}"
+    _s_active.__name__ = f"set_active_{_active_suffix}"
+    setattr(Optoma, _g_avail.__name__, _g_avail)
+    setattr(Optoma, _g_active.__name__, _g_active)
+    setattr(Optoma, _s_active.__name__, _s_active)
+
+for _raw, _public, _ in _TOGGLE_METHODS:
+    _g, _s = _make_toggle_methods(_raw)
+    _g.__name__ = f"get_{_public}"
+    _s.__name__ = f"set_{_public}"
+    setattr(Optoma, _g.__name__, _g)
+    setattr(Optoma, _s.__name__, _s)
+
+for _raw, _public in _INPUT_METHODS:
+    _g, _s = _make_input_methods(_raw)
+    _g.__name__ = f"get_{_public}"
+    _s.__name__ = f"set_{_public}"
+    setattr(Optoma, _g.__name__, _g)
+    setattr(Optoma, _s.__name__, _s)
+
+del _raw, _public, _avail_suffix, _active_suffix, _g, _s, _g_avail, _g_active, _s_active
